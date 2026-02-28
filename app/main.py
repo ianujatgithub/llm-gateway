@@ -1,5 +1,7 @@
 import os
 import time
+import logging
+import uuid
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
@@ -9,7 +11,8 @@ from openai import OpenAIError
 load_dotenv()
 
 app = FastAPI(title="LLM Gateway")
-
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("llm_gateway")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 class GenerateRequest(BaseModel):
@@ -26,11 +29,16 @@ def health_check():
 @app.post("/generate", response_model=GenerateResponse)
 def generate(request: GenerateRequest):
 
+    request_id = str(uuid.uuid4())
+    logger.info(f"Request {request_id} received")
+
     max_retries = 3
-    backoff = 1  # seconds
+    backoff = 1
 
     for attempt in range(max_retries):
         try:
+            start_time = time.time()
+
             response = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
@@ -39,17 +47,34 @@ def generate(request: GenerateRequest):
                 max_tokens=50
             )
 
+            duration = time.time() - start_time
+
+            total_tokens = response.usage.total_tokens
+
+            logger.info(
+                f"Request {request_id} success | "
+                f"tokens={total_tokens} | "
+                f"duration={duration:.2f}s | "
+                f"attempt={attempt+1}"
+            )
+
             return GenerateResponse(
                 response=response.choices[0].message.content,
-                total_tokens=response.usage.total_tokens
+                total_tokens=total_tokens
             )
 
         except OpenAIError as e:
+            logger.warning(
+                f"Request {request_id} failed attempt {attempt+1}: {str(e)}"
+            )
+
             if attempt < max_retries - 1:
                 time.sleep(backoff)
                 backoff *= 2
             else:
+                logger.error(f"Request {request_id} exhausted retries")
                 raise HTTPException(status_code=500, detail="LLM service unavailable")
 
-        except Exception:
+        except Exception as e:
+            logger.error(f"Request {request_id} unexpected error: {str(e)}")
             raise HTTPException(status_code=500, detail="Unexpected server error")
