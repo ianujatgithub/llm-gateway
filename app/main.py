@@ -3,6 +3,8 @@ import time
 import logging
 import uuid
 from fastapi import FastAPI, HTTPException
+from fastapi import Request
+from collections import defaultdict
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -13,6 +15,10 @@ load_dotenv()
 app = FastAPI(title="LLM Gateway")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("llm_gateway")
+# Simple in-memory rate limiter
+request_counts = defaultdict(list)
+RATE_LIMIT = 5
+WINDOW_SECONDS = 60
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 class GenerateRequest(BaseModel):
@@ -26,8 +32,20 @@ class GenerateResponse(BaseModel):
 def health_check():
     return {"status": "LLM Gateway running"}
 @app.post("/generate", response_model=GenerateResponse)
-def generate(request: GenerateRequest):
+def generate(request: GenerateRequest, http_request: Request):
+    client_ip = http_request.client.host
+    current_time = time.time()
 
+    # Remove expired timestamps
+    request_counts[client_ip] = [
+    timestamp for timestamp in request_counts[client_ip]
+    if current_time - timestamp < WINDOW_SECONDS
+    ]
+
+    if len(request_counts[client_ip]) >= RATE_LIMIT:
+    	raise HTTPException(status_code=429, detail="Rate limit exceeded")
+
+    request_counts[client_ip].append(current_time)
     request_id = str(uuid.uuid4())
     logger.info(f"Request {request_id} received")
     if len(request.prompt) > 2000:
